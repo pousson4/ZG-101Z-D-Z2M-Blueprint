@@ -1,0 +1,267 @@
+blueprint:
+  name: "ZG-101Z/D Zigbee Smart Knob (Zigbee2MQTT) v2"
+  description: >
+    ## Tuya / Moes ZG-101Z/D Smart Knob — Z2M Blueprint v2
+
+    Assign Home Assistant actions to every gesture the ZG-101Z/D smart knob
+    can produce via Zigbee2MQTT.
+
+    ### ⚠️ Known device quirk — read this first
+    This knob fires **two MQTT events per action**: one from command mode and
+    one from event mode, regardless of which `operation_mode` is set. This
+    blueprint resolves that by accepting only **command-mode events** and
+    filtering out all event-mode duplicates. Leave `operation_mode` at either
+    setting in Z2M — the blueprint handles both.
+
+    ### 🔇 Noise filter
+    After a hold+rotate, the knob often fires a spurious `toggle` or `single`
+    event ("tail event"). The noise filter window suppresses any non-rotation
+    event that arrives within N ms of a rotation. Default 500 ms works well for
+    most users; increase it if you still see false triggers.
+
+    ### 🗺️ Gesture map (command mode events used)
+    | Gesture | Raw event |
+    |---|---|
+    | Press (toggle) | `toggle` |
+    | Double press | `double` |
+    | Hold | `hue_move` |
+    | Hold release | `hue_stop` |
+    | Rotate left (CCW) | `brightness_step_down` |
+    | Rotate right (CW) | `brightness_step_up` |
+    | Hold + rotate left | `color_temperature_step_down` |
+    | Hold + rotate right | `color_temperature_step_up` |
+    | Saturation move | `saturation_move` |
+
+    ### Template variables available in every action sequence
+    | Variable | Description |
+    |---|---|
+    | `gesture` | Human-readable gesture name (e.g. `rotate_right`) |
+    | `native_event` | Raw action string from Z2M (e.g. `brightness_step_up`) |
+    | `action_step_size` | Step size reported by the knob (0–255) |
+    | `action_transition_time` | Transition time in seconds |
+    | `action_rate` | Rate reported by the knob (0–255) |
+    | `battery` | Current battery level (%) |
+
+  domain: automation
+
+  input:
+
+    # ── Device ────────────────────────────────────────────────────────────────
+    z2m_topic:
+      name: "Z2M MQTT Topic"
+      description: >
+        Full Zigbee2MQTT topic for your knob.
+        Format: `zigbee2mqtt/<FRIENDLY_NAME>`
+        Example: `zigbee2mqtt/living_room_knob`
+      selector:
+        text:
+
+    # ── Noise filter ──────────────────────────────────────────────────────────
+    noise_filter_ms:
+      name: "Noise Filter Window (ms)"
+      description: >
+        Milliseconds to suppress non-rotation events after a rotation.
+        Prevents spurious toggle/single "tail events" after hold+rotate.
+        Increase if you still see false triggers after rotating.
+      default: 500
+      selector:
+        number:
+          min: 0
+          max: 2000
+          step: 50
+          unit_of_measurement: ms
+
+    # ── Gestures ──────────────────────────────────────────────────────────────
+    action_press:
+      name: "Press (Toggle)"
+      description: "Single button press. Raw event: `toggle`"
+      default: []
+      selector:
+        action:
+
+    action_double:
+      name: "Double Press"
+      description: "Double button press. Raw event: `double`"
+      default: []
+      selector:
+        action:
+
+    action_hold:
+      name: "Hold"
+      description: "Button held down. Raw event: `hue_move`"
+      default: []
+      selector:
+        action:
+
+    action_hold_release:
+      name: "Hold Release"
+      description: "Button released after hold. Raw event: `hue_stop`"
+      default: []
+      selector:
+        action:
+
+    action_rotate_left:
+      name: "Rotate Left (CCW)"
+      description: "Counter-clockwise rotation. Raw event: `brightness_step_down`"
+      default: []
+      selector:
+        action:
+
+    action_rotate_right:
+      name: "Rotate Right (CW)"
+      description: "Clockwise rotation. Raw event: `brightness_step_up`"
+      default: []
+      selector:
+        action:
+
+    action_hold_rotate_left:
+      name: "Hold + Rotate Left"
+      description: "CCW rotation while holding. Raw event: `color_temperature_step_down`"
+      default: []
+      selector:
+        action:
+
+    action_hold_rotate_right:
+      name: "Hold + Rotate Right"
+      description: "CW rotation while holding. Raw event: `color_temperature_step_up`"
+      default: []
+      selector:
+        action:
+
+    action_saturation_move:
+      name: "Saturation Move"
+      description: "Saturation move gesture. Raw event: `saturation_move`"
+      default: []
+      selector:
+        action:
+
+    # ── Automation settings ───────────────────────────────────────────────────
+    automation_mode:
+      name: "Automation Mode"
+      description: >
+        `queued` is recommended — each event waits its turn without cancellation.
+        Use `restart` only if you want rotation events to interrupt each other.
+      default: queued
+      selector:
+        select:
+          mode: dropdown
+          options:
+            - queued
+            - single
+            - restart
+            - parallel
+
+mode: !input automation_mode
+max_exceeded: silent
+
+trigger:
+  - platform: mqtt
+    topic: !input z2m_topic
+
+# Accept only command-mode events (the "real" half of the dual-event pair).
+# Event-mode duplicates (single, hold, rotate_left, rotate_right) are dropped.
+condition:
+  - condition: template
+    value_template: >
+      {{ trigger.payload_json.get('action', '') in [
+        'toggle', 'double',
+        'brightness_step_up', 'brightness_step_down',
+        'color_temperature_step_up', 'color_temperature_step_down',
+        'saturation_move', 'hue_move', 'hue_stop'
+      ] }}
+
+action:
+  - variables:
+      native_event:           "{{ trigger.payload_json.get('action', '') }}"
+      action_step_size:       "{{ trigger.payload_json.get('action_step_size', 0) | int }}"
+      action_transition_time: "{{ trigger.payload_json.get('action_transition_time', 0) | float }}"
+      action_rate:            "{{ trigger.payload_json.get('action_rate', 0) | int }}"
+      battery:                "{{ trigger.payload_json.get('battery', 0) | int }}"
+      noise_filter_ms:        !input noise_filter_ms
+
+      # Map raw events → human-readable gesture names
+      gesture: >
+        {% set map = {
+          'toggle':                       'press',
+          'double':                       'double',
+          'hue_move':                     'hold',
+          'hue_stop':                     'hold_release',
+          'brightness_step_down':         'rotate_left',
+          'brightness_step_up':           'rotate_right',
+          'color_temperature_step_down':  'hold_rotate_left',
+          'color_temperature_step_up':    'hold_rotate_right',
+          'saturation_move':              'saturation_move'
+        } %}
+        {{ map.get(native_event, 'unknown') }}
+
+      is_rotation: >
+        {{ native_event in [
+          'brightness_step_up', 'brightness_step_down',
+          'color_temperature_step_up', 'color_temperature_step_down'
+        ] }}
+
+      # Noise filter: use this automation's last_triggered timestamp as a proxy
+      # for when the most recent rotation fired.
+      last_triggered_ms: >
+        {% set lt = this.attributes.get('last_triggered') %}
+        {% if lt %}
+          {{ (now() - lt | as_datetime).total_seconds() * 1000 | int }}
+        {% else %}
+          99999
+        {% endif %}
+
+      # A non-rotation event is a "tail" if it arrives within the noise window
+      # of the automation's previous execution (which was the rotation).
+      is_tail_event: >
+        {{ not is_rotation and last_triggered_ms < noise_filter_ms }}
+
+  # Bail early on tail events
+  - condition: template
+    value_template: "{{ not is_tail_event }}"
+
+  - choose:
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'press' }}"
+        sequence: !input action_press
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'double' }}"
+        sequence: !input action_double
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'hold' }}"
+        sequence: !input action_hold
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'hold_release' }}"
+        sequence: !input action_hold_release
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'rotate_left' }}"
+        sequence: !input action_rotate_left
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'rotate_right' }}"
+        sequence: !input action_rotate_right
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'hold_rotate_left' }}"
+        sequence: !input action_hold_rotate_left
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'hold_rotate_right' }}"
+        sequence: !input action_hold_rotate_right
+
+      - conditions:
+          - condition: template
+            value_template: "{{ gesture == 'saturation_move' }}"
+        sequence: !input action_saturation_move
